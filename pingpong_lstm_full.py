@@ -475,11 +475,13 @@ def main():
 
     rally_uids, action_idx, point_idx, server_prob = predict_test(final_model, test_loader, device)
 
+    serverGetPoint_threshold = 0.7
+    serverGetPoint_pred = (server_prob >= serverGetPoint_threshold).astype(int)
     submission = pd.DataFrame({
         "rally_uid": rally_uids.astype(int),
         "actionId": [inverse_maps["actionId"].get(int(x), 0) for x in action_idx],
         "pointId": [inverse_maps["pointId"].get(int(x), 0) for x in point_idx],
-        "serverGetPoint": server_prob,
+        "serverGetPoint": serverGetPoint_pred
     }).sort_values("rally_uid").reset_index(drop=True)
 
     submission.to_csv(out_dir / "submission.csv", index=False)
