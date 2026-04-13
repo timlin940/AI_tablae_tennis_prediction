@@ -45,13 +45,14 @@ SEQ_CAT_COLS = [
     "sex",
     "gamePlayerId",
     "gamePlayerOtherId",
+    "serverId",#serverId 代表發球方
     "strikeId",
     "handId",
     "strengthId",
     "spinId",
     "positionId",
     "actionId",
-    "pointId",
+    "pointId"
 ]
 
 SEQ_NUM_COLS = [
@@ -85,6 +86,9 @@ def load_df(path: str | Path) -> pd.DataFrame:
     df = pd.read_csv(path)
     df = df.sort_values([GROUP_COL, ORDER_COL]).reset_index(drop=True)
     df["score_diff"] = df["scoreSelf"] - df["scoreOther"]
+    serve = df.groupby(GROUP_COL).head(1).copy()
+    df["serverId"] = serve["gamePlayerId"].values
+    print(df.head())
     return df
 
 # 把類別值轉成 embedding index，0 留給 padding 和未知值
@@ -102,26 +106,36 @@ def apply_category_maps(df: pd.DataFrame, maps: Dict[str, Dict[int, int]], cat_c
         df[col] = df[col].map(maps[col]).fillna(0).astype(np.int64)
     return df
 
-
 def build_train_samples(df: pd.DataFrame) -> List[dict]:
     samples: List[dict] = []
+
     for rally_uid, g in df.groupby(GROUP_COL, sort=False):
         g = g.sort_values(ORDER_COL).reset_index(drop=True)
+
+        # 至少要有 2 拍，才有 prefix -> next shot
         if len(g) < 2:
             continue
-        prefix = g.iloc[:-1]
-        last_row = g.iloc[-1]
-        samples.append({
-            "rally_uid": int(rally_uid),
-            "seq_cat": prefix[SEQ_CAT_COLS].to_numpy(dtype=np.int64),
-            "seq_num": prefix[SEQ_NUM_COLS].to_numpy(dtype=np.float32),
-            "seq_len": len(prefix),
-            "y_action": int(last_row[TARGET_ACTION]),
-            "y_point": int(last_row[TARGET_POINT]),
-            "y_server": float(last_row[TARGET_SERVER]),
-        })
-    return samples
 
+        final_server = float(g.iloc[-1][TARGET_SERVER]) #是否得分
+
+        # t 是 target 那一拍的位置
+        # prefix: 0 ~ t-1
+        # target: t
+        for t in range(1, len(g)):
+            prefix = g.iloc[:t]
+            target_row = g.iloc[t]
+
+            samples.append({
+                "rally_uid": int(rally_uid),
+                "seq_cat": prefix[SEQ_CAT_COLS].to_numpy(dtype=np.int64),
+                "seq_num": prefix[SEQ_NUM_COLS].to_numpy(dtype=np.float32),
+                "seq_len": len(prefix),
+                "y_action": int(target_row[TARGET_ACTION]),
+                "y_point": int(target_row[TARGET_POINT]),
+                "y_server": final_server,
+            })
+
+    return samples
 
 def build_test_samples(df: pd.DataFrame) -> List[dict]:
     samples: List[dict] = []
@@ -359,17 +373,28 @@ def main():
     test_df_raw = load_df(CFG.test_path)
 
     category_maps = build_category_maps(train_df_raw, SEQ_CAT_COLS)
+    # v: k：表示新的字典裡，v 會變成 key，而 k 會變成 value，這樣就可以從 embedding index 反查回原始類別值
     inverse_maps = {col: {v: k for k, v in m.items()} for col, m in category_maps.items()}
 
-    # split by rally to avoid leakage
-    rally_ids = train_df_raw[GROUP_COL].drop_duplicates().to_numpy()
+    # 確保同一個 rally 的資料不會同時出現在訓練集和驗證集中，這樣模型在驗證時才不會看到訓練過程中見過的 rally 資料(改成match切割應該更好)
+    """
+    rally_ids = train_df_raw[GROUP_COL].drop_duplicates().to_numpy() # rally_uid 
     splitter = GroupShuffleSplit(n_splits=1, test_size=CFG.val_size, random_state=CFG.random_state)
     tr_idx, va_idx = next(splitter.split(rally_ids, groups=rally_ids))
     tr_rallies = set(rally_ids[tr_idx])
     va_rallies = set(rally_ids[va_idx])
+    """
 
-    train_df = train_df_raw[train_df_raw[GROUP_COL].isin(tr_rallies)].copy()
-    valid_df = train_df_raw[train_df_raw[GROUP_COL].isin(va_rallies)].copy()
+    # 改成用match切割，因為同一個match裡的rally可能會有相似的模式，這樣切能更嚴格地測試模型的泛化能力
+    match_ids = train_df_raw["match"].drop_duplicates().to_numpy()
+    splitter = GroupShuffleSplit(n_splits=1, test_size=CFG.val_size, random_state=CFG.random_state)
+    tr_idx, va_idx = next(splitter.split(match_ids, groups=match_ids))
+
+    tr_matches = set(match_ids[tr_idx])
+    va_matches = set(match_ids[va_idx])
+
+    train_df = train_df_raw[train_df_raw["match"].isin(tr_matches)].copy()
+    valid_df = train_df_raw[train_df_raw["match"].isin(va_matches)].copy()
 
     scaler = StandardScaler()
     train_df[SEQ_NUM_COLS] = scaler.fit_transform(train_df[SEQ_NUM_COLS])
@@ -474,14 +499,13 @@ def main():
         print(f"Full-train fine-tune {epoch:02d} | loss={ft_metrics['loss']:.4f}")
 
     rally_uids, action_idx, point_idx, server_prob = predict_test(final_model, test_loader, device)
-
-    serverGetPoint_threshold = 0.7
-    serverGetPoint_pred = (server_prob >= serverGetPoint_threshold).astype(int)
+    print(inverse_maps["actionId"])
+    print(inverse_maps["pointId"])
     submission = pd.DataFrame({
         "rally_uid": rally_uids.astype(int),
-        "actionId": [inverse_maps["actionId"].get(int(x), 0) for x in action_idx],
-        "pointId": [inverse_maps["pointId"].get(int(x), 0) for x in point_idx],
-        "serverGetPoint": serverGetPoint_pred
+        "actionId": [inverse_maps["actionId"][x] for x in action_idx],
+        "pointId": [inverse_maps["pointId"][x] for x in point_idx],
+        "serverGetPoint": [1 if prob > 0.75 else 0 for prob in server_prob],
     }).sort_values("rally_uid").reset_index(drop=True)
 
     submission.to_csv(out_dir / "submission.csv", index=False)
