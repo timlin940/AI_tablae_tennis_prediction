@@ -45,7 +45,6 @@ SEQ_CAT_COLS = [
     "sex",
     "gamePlayerId",
     "gamePlayerOtherId",
-    "serverId",#serverId 代表發球方
     "strikeId",
     "handId",
     "strengthId",
@@ -86,8 +85,6 @@ def load_df(path: str | Path) -> pd.DataFrame:
     df = pd.read_csv(path)
     df = df.sort_values([GROUP_COL, ORDER_COL]).reset_index(drop=True)
     df["score_diff"] = df["scoreSelf"] - df["scoreOther"]
-    serve = df.groupby(GROUP_COL).head(1).copy()
-    df["serverId"] = serve["gamePlayerId"].values
     print(df.head())
     return df
 
@@ -414,13 +411,16 @@ def main():
     if CFG.use_class_weight:
         action_w = make_class_weight([s["y_action"] for s in train_samples], len(category_maps["actionId"]) + 1).to(device)
         point_w = make_class_weight([s["y_point"] for s in train_samples], len(category_maps["pointId"]) + 1).to(device)
+        # 新增server weight，因为serverGetPoint 是二分類問題，所以 num_classes 是 2
+        server_w = make_class_weight([s["y_server"] for s in train_samples], 2).to(device) 
     else:
         action_w = None
         point_w = None
+        server_w = None
 
     crit_action = nn.CrossEntropyLoss(weight=action_w)
     crit_point = nn.CrossEntropyLoss(weight=point_w)
-    crit_server = nn.BCEWithLogitsLoss()
+    crit_server = nn.BCEWithLogitsLoss(weight=server_w)
     optimizer = torch.optim.Adam(model.parameters(), lr=CFG.lr, weight_decay=CFG.weight_decay)
 
     best_score = -np.inf
@@ -484,13 +484,15 @@ def main():
     if CFG.use_class_weight:
         full_action_w = make_class_weight([s["y_action"] for s in full_train_samples], len(category_maps["actionId"]) + 1).to(device)
         full_point_w = make_class_weight([s["y_point"] for s in full_train_samples], len(category_maps["pointId"]) + 1).to(device)
+        full_server_w = make_class_weight([s["y_server"] for s in full_train_samples], 2).to(device)
     else:
         full_action_w = None
         full_point_w = None
+        full_server_w = None
 
     full_crit_action = nn.CrossEntropyLoss(weight=full_action_w)
     full_crit_point = nn.CrossEntropyLoss(weight=full_point_w)
-    full_crit_server = nn.BCEWithLogitsLoss()
+    full_crit_server = nn.BCEWithLogitsLoss(weight=full_server_w)
 
     # light fine-tuning on full train starting from best validation model
     fine_tune_epochs = max(3, CFG.epochs // 3)
