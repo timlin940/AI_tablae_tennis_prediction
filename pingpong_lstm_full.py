@@ -25,12 +25,12 @@ class Config:
     output_dir: str = "output_data"
     batch_size: int = 64
     hidden_dim: int = 128
-    num_layers: int = 1
-    dropout: float = 0.2
-    lr: float = 1e-3
-    weight_decay: float = 1e-5
-    epochs: int = 15
-    val_size: float = 0.2
+    num_layers: int = 3
+    dropout: float = 0.3
+    lr: float = 1e-3 #0.002，1e-3 = 0.001
+    weight_decay: float = 1e-5 # L2 正則化強度
+    epochs: int = 20
+    val_size: float = 0.3 # 驗證集比例，確保模型在訓練過程中有一個獨立的資料集來評估性能，避免過擬合
     random_state: int = 42
     use_class_weight: bool = True
     num_workers: int = 0
@@ -40,6 +40,7 @@ CFG = Config()
 
 GROUP_COL = "rally_uid"
 ORDER_COL = "strikeNumber"
+# 目前的資料分割方式為:用match切割，確保同一個match裡的rally不會同時出現在訓練集和驗證集中，且在準備train sample時
 
 SEQ_CAT_COLS = [
     "sex",
@@ -58,8 +59,6 @@ SEQ_NUM_COLS = [
     "scoreSelf",
     "scoreOther",
     "score_diff",
-    "strikeNumber",
-    "numberGame",
 ]
 
 # 預測目標欄位
@@ -85,7 +84,6 @@ def load_df(path: str | Path) -> pd.DataFrame:
     df = pd.read_csv(path)
     df = df.sort_values([GROUP_COL, ORDER_COL]).reset_index(drop=True)
     df["score_diff"] = df["scoreSelf"] - df["scoreOther"]
-    print(df.head())
     return df
 
 # 把類別值轉成 embedding index，0 留給 padding 和未知值
@@ -263,7 +261,7 @@ class RallyLSTM(nn.Module):
 # =========================
 # Training utilities
 # =========================
-
+# 計算類別權重，讓模型在訓練時更重視較少見的類別，減少類別不平衡的影響
 def make_class_weight(encoded_labels: List[int], num_classes: int) -> torch.Tensor:
     counts = np.bincount(np.asarray(encoded_labels), minlength=num_classes)
     counts[0] = 0  # ignore padding idx if output has it
@@ -274,6 +272,13 @@ def make_class_weight(encoded_labels: List[int], num_classes: int) -> torch.Tens
         weights[valid] = weights[valid] / weights[valid].mean()
     weights[0] = 0.0
     return torch.tensor(weights, dtype=torch.float32)
+
+# 計算正負類別的權重，讓模型在訓練時更重視較少見的類別，減少類別不平衡的影響（針對二分類問題）
+def make_pos_weight(encoded_labels: List[int]) -> torch.Tensor:
+    counts = np.bincount(np.asarray(encoded_labels), minlength=2)
+    if counts[1] == 0:
+        return torch.tensor([1.0], dtype=torch.float32)
+    return torch.tensor([counts[0] / counts[1]], dtype=torch.float32)
 
 
 def competition_score(y_action_true, y_action_pred, y_point_true, y_point_pred, y_server_true, y_server_prob):
@@ -373,15 +378,6 @@ def main():
     # v: k：表示新的字典裡，v 會變成 key，而 k 會變成 value，這樣就可以從 embedding index 反查回原始類別值
     inverse_maps = {col: {v: k for k, v in m.items()} for col, m in category_maps.items()}
 
-    # 確保同一個 rally 的資料不會同時出現在訓練集和驗證集中，這樣模型在驗證時才不會看到訓練過程中見過的 rally 資料(改成match切割應該更好)
-    """
-    rally_ids = train_df_raw[GROUP_COL].drop_duplicates().to_numpy() # rally_uid 
-    splitter = GroupShuffleSplit(n_splits=1, test_size=CFG.val_size, random_state=CFG.random_state)
-    tr_idx, va_idx = next(splitter.split(rally_ids, groups=rally_ids))
-    tr_rallies = set(rally_ids[tr_idx])
-    va_rallies = set(rally_ids[va_idx])
-    """
-
     # 改成用match切割，因為同一個match裡的rally可能會有相似的模式，這樣切能更嚴格地測試模型的泛化能力
     match_ids = train_df_raw["match"].drop_duplicates().to_numpy()
     splitter = GroupShuffleSplit(n_splits=1, test_size=CFG.val_size, random_state=CFG.random_state)
@@ -403,7 +399,7 @@ def main():
     train_samples = build_train_samples(train_df)
     valid_samples = build_train_samples(valid_df)
 
-    train_loader = make_loader(train_samples, CFG.batch_size, shuffle=True, is_train=True)
+    train_loader = make_loader(train_samples, CFG.batch_size, shuffle=True, is_train=True) 
     valid_loader = make_loader(valid_samples, CFG.batch_size, shuffle=False, is_train=True)
 
     model = RallyLSTM(category_maps, CFG.hidden_dim, CFG.num_layers, CFG.dropout).to(device)
@@ -411,21 +407,22 @@ def main():
     if CFG.use_class_weight:
         action_w = make_class_weight([s["y_action"] for s in train_samples], len(category_maps["actionId"]) + 1).to(device)
         point_w = make_class_weight([s["y_point"] for s in train_samples], len(category_maps["pointId"]) + 1).to(device)
-        # 新增server weight，因为serverGetPoint 是二分類問題，所以 num_classes 是 2
-        server_w = make_class_weight([s["y_server"] for s in train_samples], 2).to(device) 
+        server_pos_weight = make_pos_weight([int(s["y_server"]) for s in train_samples]).to(device)
     else:
         action_w = None
         point_w = None
-        server_w = None
+        server_pos_weight = None
 
     crit_action = nn.CrossEntropyLoss(weight=action_w)
     crit_point = nn.CrossEntropyLoss(weight=point_w)
-    crit_server = nn.BCEWithLogitsLoss(weight=server_w)
+    crit_server = nn.BCEWithLogitsLoss(pos_weight=server_pos_weight)
     optimizer = torch.optim.Adam(model.parameters(), lr=CFG.lr, weight_decay=CFG.weight_decay)
 
     best_score = -np.inf
     best_state = None
 
+    best_v_loss = 100
+ 
     for epoch in range(1, CFG.epochs + 1):
         tr_metrics = run_epoch(model, train_loader, optimizer, crit_action, crit_point, crit_server, device, train=True)
         va_metrics = run_epoch(model, valid_loader, optimizer, crit_action, crit_point, crit_server, device, train=False)
@@ -439,11 +436,12 @@ def main():
             f"server_auc={va_metrics['server_auc']:.4f} | "
             f"score={va_metrics['score']:.4f}"
         )
-
-        if not np.isnan(va_metrics["score"]) and va_metrics["score"] > best_score:
+        # 加上val_loss的條件，避免過擬合，整體較嚴格地選出在驗證集上表現穩定且分數較高的模型
+        if not np.isnan(va_metrics["score"]) and va_metrics["score"] > best_score and va_metrics["loss"] < best_v_loss:
             best_score = va_metrics["score"]
+            best_v_loss = va_metrics["loss"]
             best_state = {k: v.cpu() for k, v in model.state_dict().items()}
-
+            
     if best_state is None:
         raise RuntimeError("Validation did not produce a usable model.")
 
@@ -474,7 +472,7 @@ def main():
     full_train_samples = build_train_samples(train_full_df)
     test_samples = build_test_samples(test_full_df)
 
-    full_train_loader = make_loader(full_train_samples, CFG.batch_size, shuffle=True, is_train=True)
+    full_train_loader = make_loader(full_train_samples, CFG.batch_size, shuffle=True, is_train=True) 
     test_loader = make_loader(test_samples, CFG.batch_size, shuffle=False, is_train=False)
 
     final_model = RallyLSTM(category_maps, CFG.hidden_dim, CFG.num_layers, CFG.dropout).to(device)
@@ -484,15 +482,15 @@ def main():
     if CFG.use_class_weight:
         full_action_w = make_class_weight([s["y_action"] for s in full_train_samples], len(category_maps["actionId"]) + 1).to(device)
         full_point_w = make_class_weight([s["y_point"] for s in full_train_samples], len(category_maps["pointId"]) + 1).to(device)
-        full_server_w = make_class_weight([s["y_server"] for s in full_train_samples], 2).to(device)
+        full_server_pos_weight = make_pos_weight([int(s["y_server"]) for s in full_train_samples]).to(device)
     else:
         full_action_w = None
         full_point_w = None
-        full_server_w = None
+        full_server_pos_weight = None
 
     full_crit_action = nn.CrossEntropyLoss(weight=full_action_w)
     full_crit_point = nn.CrossEntropyLoss(weight=full_point_w)
-    full_crit_server = nn.BCEWithLogitsLoss(weight=full_server_w)
+    full_crit_server = nn.BCEWithLogitsLoss(pos_weight=full_server_pos_weight)
 
     # light fine-tuning on full train starting from best validation model
     fine_tune_epochs = max(3, CFG.epochs // 3)
