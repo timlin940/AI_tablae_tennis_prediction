@@ -15,8 +15,8 @@ from sklearn.preprocessing import StandardScaler
 
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence
 from torch.utils.data import DataLoader, Dataset
-
-
+# 沒有加early stopping
+# 也許改用rally ID來做分群就好，而不是matchID，因為這樣模型就不會過度學習一場比賽的特定模式了，能夠更好地泛化到不同的比賽和選手上
 # =========================
 # Config
 # =========================
@@ -55,9 +55,9 @@ TARGET_POINT = "pointId"
 TARGET_SERVER = "serverGetPoint"
 
 SEQ_CAT_COLS = [ # pointID會有接球方左右手問題，目前無解
-    "gamePlayerId",
-    "gamePlayerOtherId",
-    "strikeId",
+    #"gamePlayerId", 避免過度學習特定選手的行為模式了，能夠更好地泛化到不同的選手上了。
+    #"gamePlayerOtherId",
+    #"strikeId",其主要用來表示誰發球、誰接球，已經有is_serve這個特徵了，先不放進來
     "handId",
     "strengthId",
     "spinId",
@@ -68,8 +68,8 @@ SEQ_CAT_COLS = [ # pointID會有接球方左右手問題，目前無解
 
 
 SEQ_NUM_COLS = [
-    "scoreSelf",
-    "scoreOther",
+    # "scoreSelf",
+    # "scoreOther", 得分會一直變動，直接用 score_diff 可能比較合理
     "score_diff",
     # "strikeNumber",
     # "numberGame",
@@ -79,6 +79,13 @@ SEQ_NUM_COLS = [
     "is_defensive",
     "is_serve",
 ]
+# 用來增加一些數值特徵，讓模型更容易學習攻擊、防守、接發球等行為模式
+IMPORTANT_EMB_DIM = {
+    "spinId": 16,
+    "strengthId": 16,
+    "actionId": 24,
+    "pointId": 24,
+}
 
 # =========================
 # Basic utils
@@ -254,7 +261,7 @@ class RallyCollator:
     def __call__(self, batch: List[dict]) -> dict:
         batch = sorted(batch, key=lambda x: x["seq_len"], reverse=True)
 
-        seq_cat = pad_sequence(
+        seq_cat = pad_sequence( # 給時間長度不同的序列做 padding，也就是把短的序列後面補 0，讓它們能夠在同一個 batch 中一起處理
             [torch.tensor(x["seq_cat"], dtype=torch.long) for x in batch],
             batch_first=True,
             padding_value=0,
@@ -326,8 +333,18 @@ class BaseRallyEncoder(nn.Module):
 
         for col in self.cat_cols:
             card = len(category_maps[col]) + 1
-            dim = get_emb_dim(card)
-            self.embeddings[col] = nn.Embedding(card, dim, padding_idx=0)
+
+            # 重要欄位使用更大 embedding
+            if col in IMPORTANT_EMB_DIM:
+                dim = IMPORTANT_EMB_DIM[col]
+            else:
+                dim = get_emb_dim(card)
+
+            self.embeddings[col] = nn.Embedding(
+                card,
+                dim,
+                padding_idx=0,
+            )
             total_emb_dim += dim
 
         input_dim = total_emb_dim + len(SEQ_NUM_COLS)
@@ -350,7 +367,7 @@ class BaseRallyEncoder(nn.Module):
 
         x = torch.cat(embs + [seq_num], dim=-1)
 
-        packed = pack_padded_sequence(
+        packed = pack_padded_sequence( # 給 LSTM 一個 PackedSequence，讓它能夠處理不同長度的序列，並且在計算時忽略 padding 的部分
             x,
             seq_len.cpu(),
             batch_first=True,
@@ -585,7 +602,7 @@ def main():
     # Match-based split
     # =========================
 
-    match_ids = train_df_raw[MATCH_COL].drop_duplicates().to_numpy()
+    rally_ids = train_df_raw[GROUP_COL].drop_duplicates().to_numpy()
 
     splitter = GroupShuffleSplit(
         n_splits=1,
@@ -593,17 +610,24 @@ def main():
         random_state=CFG.random_state,
     )
 
-    tr_idx, va_idx = next(splitter.split(match_ids, groups=match_ids))
+    tr_idx, va_idx = next(
+        splitter.split(rally_ids, groups=rally_ids)
+    )
 
-    tr_matches = set(match_ids[tr_idx])
-    va_matches = set(match_ids[va_idx])
+    tr_rallies = set(rally_ids[tr_idx])
+    va_rallies = set(rally_ids[va_idx])
 
-    train_df = train_df_raw[train_df_raw[MATCH_COL].isin(tr_matches)].copy()
-    valid_df = train_df_raw[train_df_raw[MATCH_COL].isin(va_matches)].copy()
+    train_df = train_df_raw[
+        train_df_raw[GROUP_COL].isin(tr_rallies)
+    ].copy()
 
-    print("Train matches:", train_df[MATCH_COL].nunique())
-    print("Valid matches:", valid_df[MATCH_COL].nunique())
-    print("Overlap matches:", set(train_df[MATCH_COL]) & set(valid_df[MATCH_COL]))
+    valid_df = train_df_raw[
+        train_df_raw[GROUP_COL].isin(va_rallies)
+    ].copy()
+
+    print("Train rallies:", train_df[GROUP_COL].nunique())
+    print("Valid rallies:", valid_df[GROUP_COL].nunique())
+    print("Overlap rallies:", set(train_df[GROUP_COL]) & set(valid_df[GROUP_COL]))
 
     # =========================
     # Scaling / Encoding
