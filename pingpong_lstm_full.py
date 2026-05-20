@@ -14,6 +14,8 @@ from sklearn.preprocessing import StandardScaler
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence
 from torch.utils.data import DataLoader, Dataset
 
+# 目前問題，過擬合，應該是因為訓練資料沒處理乾淨
+
 # =========================
 # Config
 # =========================
@@ -101,7 +103,7 @@ def apply_category_maps(df: pd.DataFrame, maps: Dict[str, Dict[int, int]], cat_c
         df[col] = df[col].map(maps[col]).fillna(0).astype(np.int64)
     return df
 
-def build_train_samples(df: pd.DataFrame) -> List[dict]:
+def build_train_samples(df: pd.DataFrame) -> List[dict]: #檢查一下這裡，確保 prefix 和 target 的定義是正確的，且符合模型的訓練需求
     samples: List[dict] = []
 
     for rally_uid, g in df.groupby(GROUP_COL, sort=False):
