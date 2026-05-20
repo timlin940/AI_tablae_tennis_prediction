@@ -18,8 +18,10 @@ from torch.utils.data import Dataset, DataLoader
 
 # 也許改用rally ID來做分群就好，而不是matchID，因為這樣模型就不會過度學習一場比賽的特定模式了，能夠更好地泛化到不同的比賽和選手上
 # 原本用match ID分群後，valid loss在某個epoch開始就不再降低了甚至開始暴升，而train loss則是迅速降低，代表模型開始過度學習某些比賽的特定模式了，無法泛化到不同的比賽和選手上了。
-# 已知用ally ID分群後，valid loss有持續降低，train loss則是緩慢降低(慢很多)，準確度從0.30提升至0.4左右，hidden_dim = 256，num_layers = 3，dropout = 0.3，lr = 1e-3，weight_decay = 1e-5，epochs = 20，batch_size = 64，使用class weight，沒有early stopping。
-# 提升layer後整體表現大幅下降
+# 已知用ally ID分群後，valid loss有持續降低，train loss則是緩慢降低(慢很多)，準確度從0.30提升至0.4左右，
+# hidden_dim = 256，num_layers = 3，dropout = 0.3，lr = 1e-3，weight_decay = 1e-5，epochs = 15，batch_size = 32，使用class weight，沒有early stopping。
+# 提升layer後整體表現大幅下降並出現過擬合   ，目前是hidden_dim = 256，num_layers = 5，dropout = 0.45，lr = 15e-4，weight_decay = 1e-5，epochs = 15，batch_size = 64，使用class weight，沒有early stopping。
+
 
 # =========================
 # Config
@@ -31,14 +33,14 @@ class Config:
     test_path: str = "Data/test.csv"
     output_dir: str = "output_data_test_action"
 
-    batch_size: int = 64
+    batch_size: int = 32
     hidden_dim: int = 256 
-    num_layers: int = 4 
-    dropout: float = 0.4
+    num_layers: int = 3 
+    dropout: float = 0.3
 
-    lr: float = 1e-3 #15e-4，
+    lr: float = 1e-3
     weight_decay: float = 1e-5
-    epochs: int = 20
+    epochs: int = 15
 
     val_size: float = 0.2
     random_state: int = 42
@@ -57,14 +59,13 @@ TARGET = "actionId"
 
 
 SEQ_CAT_COLS = [
-    "sex",
-    #"gamePlayerId", 避免過度
-    #"gamePlayerOtherId",
+    "gamePlayerId", 
+    "gamePlayerOtherId",
     #"strikeId", 其主要用來表示誰發球、誰接球，已經有is_serve這個特徵了，先不放進來
     "handId",
     "strengthId",
     "spinId",
-    "pointId",
+    "pointId", # 需要根據左右慣用手加工成絕對座標
     "actionId",
     "positionId",
 ]
@@ -72,7 +73,7 @@ SEQ_CAT_COLS = [
 SEQ_NUM_COLS = [
     # "scoreSelf",
     # "scoreOther", 目前只判斷actionId，分數可能沒有那麼重要，先不放進來
-    "score_diff",
+    # "score_diff",
 
     "is_attack",
     "is_control",
