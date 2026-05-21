@@ -38,12 +38,12 @@ class Config:
     num_layers: int = 3 
     dropout: float = 0.3
 
-    lr: float = 1e-3
+    lr: float = 1e-3 # 1e-3有點太低，模型學習會進入局部最小值，無法繼續提升了，試試看3e-3，甚至5e-3或1e-2
     weight_decay: float = 1e-5
-    epochs: int = 15
+    epochs: int = 10
 
     val_size: float = 0.2
-    random_state: int = 42
+    random_state: int = 30
 
     use_class_weight: bool = True
     num_workers: int = 0
@@ -135,8 +135,9 @@ def apply_category_maps(df: pd.DataFrame, maps: Dict[str, Dict[int, int]], cat_c
 
 
 def get_emb_dim(cardinality: int):
-    return min(32, max(4, int(math.sqrt(cardinality) + 1)))
-
+    return min(24, max(4, int(math.sqrt(cardinality) + 1)))
+    # emb緯度選擇:越多類別越大，emb緯度越高，但是有可能過擬合；越小緯度越小，資料被壓縮的越厲害，可能無法捕捉到類別之間的差異。
+    # 48和32在EP7、8有點過擬合
 
 # =========================
 # Samples
