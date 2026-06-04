@@ -27,18 +27,18 @@ class Config:
     test_path: str = "Data/test.csv"
     output_dir: str = "output_data"
 
-    batch_size: int = 64
-    hidden_dim: int = 256 # 隱藏層維度，過小可能無法捕捉複雜模式，過大可能導致過擬合和訓練不穩定
-    num_layers: int = 5 # LSTM 層數，增加層數可以捕捉更複雜的模式，但也可能導致過擬合和梯度消失問題
-    dropout: float = 0.4
+    batch_size: int = 32
+    hidden_dim: int = 256 
+    num_layers: int = 3 
+    dropout: float = 0.3
 
-    lr: float = 1e-3
-    weight_decay: float = 5e-5
-    epochs: int = 15
+    lr: float = 1e-3 # 1e-3有點太低，模型學習會進入局部最小值，無法繼續提升了，試試看3e-3，甚至5e-3或1e-2
+    weight_decay: float = 1e-5
+    epochs: int = 10
 
-    val_size: float = 0.4
-    random_state: int = 40
-
+    val_size: float = 0.25
+    random_state: int = 30
+    
     use_class_weight: bool = True
     num_workers: int = 0
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -54,38 +54,32 @@ TARGET_ACTION = "actionId"
 TARGET_POINT = "pointId"
 TARGET_SERVER = "serverGetPoint"
 
-SEQ_CAT_COLS = [ # pointID會有接球方左右手問題，目前無解
-    #"gamePlayerId", 避免過度學習特定選手的行為模式了，能夠更好地泛化到不同的選手上了。
-    #"gamePlayerOtherId",
-    #"strikeId",其主要用來表示誰發球、誰接球，已經有is_serve這個特徵了，先不放進來
+SEQ_CAT_COLS = [
+    "gamePlayerId", 
+    "gamePlayerOtherId",
+    #"strikeId", 其主要用來表示誰發球、誰接球，已經有is_serve這個特徵了，先不放進來
     "handId",
     "strengthId",
     "spinId",
-    "positionId",
+    "pointId", # 需要根據左右慣用手加工成絕對座標
     "actionId",
-    "pointId",
+    "positionId",
 ]
-
 
 SEQ_NUM_COLS = [
     # "scoreSelf",
-    # "scoreOther", 得分會一直變動，直接用 score_diff 可能比較合理
-    "score_diff",
-    # "strikeNumber",
-    # "numberGame",
+    # "scoreOther", 目前只判斷actionId，分數可能沒有那麼重要，先不放進來
+    # "score_diff",
 
     "is_attack",
     "is_control",
     "is_defensive",
     "is_serve",
 ]
-# 用來增加一些數值特徵，讓模型更容易學習攻擊、防守、接發球等行為模式
-IMPORTANT_EMB_DIM = {
-    "spinId": 16,
-    "strengthId": 16,
-    "actionId": 24,
-    "pointId": 24,
-}
+ATTACK_ACTIONS = [1, 2, 3, 4, 5, 6, 7]
+CONTROL_ACTIONS = [8, 9, 10, 11]
+DEFENSIVE_ACTIONS = [12, 13, 14]
+SERVE_ACTIONS = [15, 16, 17, 18]
 
 # =========================
 # Basic utils
@@ -172,7 +166,7 @@ def apply_category_maps(
 
 
 def get_emb_dim(cardinality: int) -> int:
-    return min(32, max(4, int(math.sqrt(cardinality) + 1)))
+    return min(16, max(4, int(math.sqrt(cardinality) + 1)))
 
 
 # =========================
@@ -330,6 +324,10 @@ class BaseRallyEncoder(nn.Module):
         self.embeddings = nn.ModuleDict()
 
         total_emb_dim = 0
+        IMPORTANT_EMB_DIM = {
+             "actionId": 32,
+             "pointId": 24,
+        }
 
         for col in self.cat_cols:
             card = len(category_maps[col]) + 1
